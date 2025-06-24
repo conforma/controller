@@ -8,6 +8,6 @@ layout:
 plugins:
   manifests.sdk.operatorframework.io/v2: {}
   scorecard.sdk.operatorframework.io/v2: {}
-projectName: conforma-controller-refactor
+projectName: conforma-controller
 repo: github.com/conforma/controller
 version: "3"
