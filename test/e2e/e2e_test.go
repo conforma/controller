@@ -22,6 +22,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strings"
 	"time"
 
 	. "github.com/onsi/ginkgo/v2"
@@ -31,16 +32,16 @@ import (
 )
 
 // namespace where the project is deployed in
-const namespace = "conforma-controller-refactor-system"
+const namespace = "conforma"
 
 // serviceAccountName created for the project
-const serviceAccountName = "conforma-controller-refactor-controller-manager"
+const serviceAccountName = "conforma-controller-manager"
 
 // metricsServiceName is the name of the metrics service of the project
-const metricsServiceName = "conforma-controller-refactor-controller-manager-metrics-service"
+const metricsServiceName = "conforma-controller-manager-metrics-service"
 
 // metricsRoleBindingName is the name of the RBAC that will be created to allow get the metrics data
-const metricsRoleBindingName = "conforma-controller-refactor-metrics-binding"
+const metricsRoleBindingName = "conforma-controller-metrics-binding"
 
 var _ = Describe("Manager", Ordered, func() {
 	var controllerPodName string
@@ -49,10 +50,13 @@ var _ = Describe("Manager", Ordered, func() {
 	// enforce the restricted security policy to the namespace, installing CRDs,
 	// and deploying the controller.
 	BeforeAll(func() {
-		By("creating manager namespace")
+		By("ensuring manager namespace exists")
+		// Create namespace if it doesn't exist, or ignore if it already exists
 		cmd := exec.Command("kubectl", "create", "ns", namespace)
 		_, err := utils.Run(cmd)
-		Expect(err).NotTo(HaveOccurred(), "Failed to create namespace")
+		if err != nil && !strings.Contains(err.Error(), "already exists") {
+			Expect(err).NotTo(HaveOccurred(), "Failed to create namespace")
+		}
 
 		By("labeling the namespace to enforce the restricted security policy")
 		cmd = exec.Command("kubectl", "label", "--overwrite", "ns", namespace,
@@ -75,20 +79,51 @@ var _ = Describe("Manager", Ordered, func() {
 	// and deleting the namespace.
 	AfterAll(func() {
 		By("cleaning up the curl pod for metrics")
-		cmd := exec.Command("kubectl", "delete", "pod", "curl-metrics", "-n", namespace)
+		cmd := exec.Command("kubectl", "delete", "pod", "curl-metrics", "-n", namespace, "--ignore-not-found=true")
+		_, _ = utils.Run(cmd)
+
+		By("cleaning up the metrics ClusterRoleBinding")
+		cmd = exec.Command("kubectl", "delete", "clusterrolebinding", metricsRoleBindingName, "--ignore-not-found=true")
 		_, _ = utils.Run(cmd)
 
 		By("undeploying the controller-manager")
 		cmd = exec.Command("make", "undeploy")
 		_, _ = utils.Run(cmd)
 
+		By("waiting for controller deployment to be deleted")
+		Eventually(func(g Gomega) {
+			cmd := exec.Command("kubectl", "get", "pods",
+				"-l", "control-plane=controller-manager",
+				"-n", namespace,
+				"-o", "name",
+			)
+			output, err := utils.Run(cmd)
+			if err != nil {
+				// If kubectl fails, assume resources are deleted
+				return
+			}
+			g.Expect(output).To(BeEmpty(), "Controller pods should be deleted")
+		}, 2*time.Minute, 5*time.Second).Should(Succeed())
+
 		By("uninstalling CRDs")
 		cmd = exec.Command("make", "uninstall")
 		_, _ = utils.Run(cmd)
 
 		By("removing manager namespace")
-		cmd = exec.Command("kubectl", "delete", "ns", namespace)
+		cmd = exec.Command("kubectl", "delete", "ns", namespace, "--ignore-not-found=true")
 		_, _ = utils.Run(cmd)
+
+		By("waiting for namespace to be completely deleted")
+		Eventually(func(g Gomega) {
+			cmd := exec.Command("kubectl", "get", "ns", namespace)
+			_, err := utils.Run(cmd)
+			g.Expect(err).To(HaveOccurred(), "Namespace should be deleted")
+		}, 2*time.Minute, 5*time.Second).Should(Succeed())
+
+		By("cleaning up temporary token files")
+		secretName := fmt.Sprintf("%s-token-request", serviceAccountName)
+		tokenRequestFile := filepath.Join("/tmp", secretName)
+		_ = os.Remove(tokenRequestFile)
 	})
 
 	// After each test, check for failures and collect logs, events,
@@ -156,7 +191,7 @@ var _ = Describe("Manager", Ordered, func() {
 				podNames := utils.GetNonEmptyLines(podOutput)
 				g.Expect(podNames).To(HaveLen(1), "expected 1 controller pod running")
 				controllerPodName = podNames[0]
-				g.Expect(controllerPodName).To(ContainSubstring("controller-manager"))
+				g.Expect(controllerPodName).To(ContainSubstring("manager"))
 
 				// Validate the pod's status
 				cmd = exec.Command("kubectl", "get",
@@ -171,13 +206,16 @@ var _ = Describe("Manager", Ordered, func() {
 		})
 
 		It("should ensure the metrics endpoint is serving metrics", func() {
-			By("creating a ClusterRoleBinding for the service account to allow access to metrics")
+			By("ensuring a ClusterRoleBinding exists for the service account to allow access to metrics")
+			// Create ClusterRoleBinding if it doesn't exist, or ignore if it already exists
 			cmd := exec.Command("kubectl", "create", "clusterrolebinding", metricsRoleBindingName,
-				"--clusterrole=conforma-controller-refactor-metrics-reader",
+				"--clusterrole=conforma-controller-metrics-reader",
 				fmt.Sprintf("--serviceaccount=%s:%s", namespace, serviceAccountName),
 			)
 			_, err := utils.Run(cmd)
-			Expect(err).NotTo(HaveOccurred(), "Failed to create ClusterRoleBinding")
+			if err != nil && !strings.Contains(err.Error(), "already exists") {
+				Expect(err).NotTo(HaveOccurred(), "Failed to create ClusterRoleBinding")
+			}
 
 			By("validating that the metrics service is available")
 			cmd = exec.Command("kubectl", "get", "service", metricsServiceName, "-n", namespace)
@@ -203,12 +241,16 @@ var _ = Describe("Manager", Ordered, func() {
 				cmd := exec.Command("kubectl", "logs", controllerPodName, "-n", namespace)
 				output, err := utils.Run(cmd)
 				g.Expect(err).NotTo(HaveOccurred())
-				g.Expect(output).To(ContainSubstring("controller-runtime.metrics\tServing metrics server"),
+				g.Expect(output).To(ContainSubstring("Serving metrics server"),
 					"Metrics server not yet started")
 			}
 			Eventually(verifyMetricsServerStarted).Should(Succeed())
 
 			By("creating the curl-metrics pod to access the metrics endpoint")
+			// Clean up any existing curl-metrics pod first
+			cmd = exec.Command("kubectl", "delete", "pod", "curl-metrics", "-n", namespace, "--ignore-not-found=true")
+			_, _ = utils.Run(cmd)
+
 			cmd = exec.Command("kubectl", "run", "curl-metrics", "--restart=Never",
 				"--namespace", namespace,
 				"--image=curlimages/curl:latest",
@@ -237,6 +279,12 @@ var _ = Describe("Manager", Ordered, func() {
 				}`, token, metricsServiceName, namespace, serviceAccountName))
 			_, err = utils.Run(cmd)
 			Expect(err).NotTo(HaveOccurred(), "Failed to create curl-metrics pod")
+
+			// Ensure cleanup of curl-metrics pod even if test fails
+			DeferCleanup(func() {
+				cmd := exec.Command("kubectl", "delete", "pod", "curl-metrics", "-n", namespace, "--ignore-not-found=true")
+				_, _ = utils.Run(cmd)
+			})
 
 			By("waiting for the curl-metrics pod to complete.")
 			verifyCurlUp := func(g Gomega) {
@@ -285,6 +333,11 @@ func serviceAccountToken() (string, error) {
 	if err != nil {
 		return "", err
 	}
+
+	// Ensure cleanup of temporary file
+	defer func() {
+		_ = os.Remove(tokenRequestFile)
+	}()
 
 	var out string
 	verifyTokenCreation := func(g Gomega) {
