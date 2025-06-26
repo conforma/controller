@@ -4,5 +4,19 @@ apiVersion: kustomize.config.k8s.io/v1beta1
 kind: Kustomization
 images:
 - name: controller
-  newName: example.com/conforma-controller
-  newTag: v0.0.1
+  newName: conforma/controller
+  newTag: v0.1
+
+configMapGenerator:
+- literals:
+  - IGNORE_REKOR=true
+  - TIMEOUT=60m
+  - WORKERS=1
+  - POLICY_CONFIGURATION=github.com/conforma/config//slsa3
+  - PUBLIC_KEY=k8s://conforma/public-key
+  - GIT_URL=https://github.com/conforma/cli
+  - GIT_REVISION=main
+  - GIT_PATH=tasks/verify-enterprise-contract/0.1/verify-enterprise-contract.yaml
+  name: conforma-params
+  options:
+    disableNameSuffixHash: true
