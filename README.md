@@ -22,22 +22,19 @@ This controller watches for [Tekton](https://tekton.dev/) `PipelineRun` resource
 
 1. The controller listens for `PipelineRun` objects that:
    - Have the annotation: `chains.tekton.dev/signed: "true"`
-   - Do **not** yet have the annotation `conforma.dev/validation`
+   - Do **not** yet have the annotation `conforma.dev/triggered-on`
 
 2. For each such `PipelineRun`, it triggers a `TaskRun` that runs a validation binary (you define the image + logic).
 
-3. When the `TaskRun` finishes, it annotates the `PipelineRun` with:
-
-   - `conforma.dev/validation: success` (if `TaskRun` succeeded)
-   - `conforma.dev/validation: failure` (if `TaskRun` failed)
+3. It annotates the `PipelineRun` with the timestamp of the Conforma cli execution triggered.
 
 4. The controller never processes the same `PipelineRun` twice.
 
 ## 🛠 Configuration
 
-| Env Var           | Description                                               |
-|-------------------|-----------------------------------------------------------|
-| `VALIDATOR_IMAGE` | Container image containing your validation logic          |
+| Env Var           | Description                                                 |
+| ----------------- | ----------------------------------------------------------- |
+| `VALIDATOR_IMAGE` | Container image containing your validation logic            |
 | `VALIDATOR_SA`    | (Optional) ServiceAccount name for the validation `TaskRun` |
 
 Set these in the `Deployment` under `config/manager/manager.yaml`.
@@ -49,6 +46,9 @@ Set these in the `Deployment` under `config/manager/manager.yaml`.
 ```bash
 # Create the target namespace if needed
 kubectl create namespace conforma --dry-run=client -o yaml | kubectl apply -f -
+
+# Create the tekton-chains namespace if needed (for generating the public key)
+kubectl create namespace tekton-chains --dry-run=client -o yaml | kubectl apply -f -
 
 # Deploy the controller using ko
 KO_DOCKER_REPO=ghcr.io/your-org \
